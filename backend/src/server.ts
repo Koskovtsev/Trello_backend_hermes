@@ -141,7 +141,7 @@ app.post('/login', async (req: Request, res: Response): Promise<void> => {
     const { email, password } = req.body as { email: string; password: string };
     const user = await prisma.user.findUnique({ where: { email } });
 
-    if (!user || !(await bcrypt.compare(password, user.password))) {
+    if (!user || !(await bcrypt.compare(password, (user as any).password))) {
       res.status(401).json({ error: 'Invalid email or password' });
       return;
     }
@@ -172,7 +172,7 @@ app.post('/refresh', async (req: Request, res: Response): Promise<void> => {
     const decoded = jwt.verify(refreshToken, REFRESH_TOKEN_SECRET) as { userId: number };
     const user = await prisma.user.findUnique({ where: { id: decoded.userId } });
 
-    if (!user || user.refreshToken !== refreshToken) {
+    if (!user || (user as any).refreshToken !== refreshToken) {
       res.status(401).json({ error: 'Invalid refresh token' });
       return;
     }
@@ -193,7 +193,7 @@ app.post('/refresh', async (req: Request, res: Response): Promise<void> => {
 
 app.get('/board/', async (req: Request, res: Response): Promise<void> => {
   try {
-    const userId = (req as any).userId;
+    const { userId } = req as any;
     const boards = await prisma.boardUser.findMany({
       where: { userId },
       include: { board: true },
@@ -212,7 +212,7 @@ app.get('/board/', async (req: Request, res: Response): Promise<void> => {
 
 app.get('/board/:id', async (req: Request, res: Response): Promise<void> => {
   try {
-    const userId = (req as any).userId;
+    const { userId } = req as any;
     const boardId = Number(getParam(req.params.id));
     const board = await prisma.board.findFirst({
       where: {
@@ -264,7 +264,7 @@ app.get('/board/:id', async (req: Request, res: Response): Promise<void> => {
 
 app.post('/board/', async (req: Request, res: Response): Promise<void> => {
   try {
-    const userId = (req as any).userId;
+    const { userId } = req as any;
     const { title, custom } = req.body as { title: string; custom?: unknown };
     const board = await prisma.board.create({
       data: {
@@ -472,7 +472,14 @@ app.put('/board/:id/card/', async (req: Request, res: Response): Promise<void> =
 app.put('/board/:id/card/:cardId', async (req: Request, res: Response): Promise<void> => {
   try {
     const cardId = Number(getParam(req.params.cardId));
-    const { title, description, position, color, custom, list_id: listIdFromBody } = req.body as Record<string, unknown>;
+    const {
+      title,
+      description,
+      position,
+      color,
+      custom,
+      list_id: listIdFromBody,
+    } = req.body as Record<string, unknown>;
 
     const data: Record<string, unknown> = {};
     if (title !== undefined) data.title = title;
