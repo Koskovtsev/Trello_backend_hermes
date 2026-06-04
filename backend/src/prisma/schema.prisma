@@ -1,0 +1,65 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = "file:./dev.db"
+}
+
+model User {
+  id           BigInt    @id @default(autoincrement())
+  email        String    @unique
+  username     String
+  password     String    @default("change_me")
+  refreshToken String?
+  boards       BoardUser[]
+  cards        CardUser[]
+}
+
+model Board {
+  id        BigInt      @id @default(autoincrement())
+  title     String
+  custom    String?
+  lists     List[]      @relation("BoardLists")
+  users     BoardUser[]
+}
+
+model BoardUser {
+  userId BigInt
+  boardId BigInt
+  user   User   @relation(fields: [userId], references: [id])
+  board  Board  @relation(fields: [boardId], references: [id])
+  @@id([userId, boardId])
+}
+
+model List {
+  id        BigInt  @id @default(autoincrement())
+  title     String
+  position  Int?
+  custom    String?
+  boardId   BigInt
+  board     Board   @relation("BoardLists", fields: [boardId], references: [id])
+  cards     Card[]  @relation("ListCards")
+}
+
+model Card {
+  id          BigInt    @id @default(autoincrement())
+  title       String?
+  position    Int?
+  listId      BigInt
+  list        List      @relation("ListCards", fields: [listId], references: [id])
+  color       String?
+  description String?
+  custom      String?
+  created_at  BigInt?
+  users       CardUser[]
+}
+
+model CardUser {
+  cardId BigInt
+  userId BigInt
+  card   Card @relation(fields: [cardId], references: [id])
+  user   User @relation(fields: [userId], references: [id])
+  @@id([cardId, userId])
+}
