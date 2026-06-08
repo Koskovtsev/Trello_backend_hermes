@@ -47,7 +47,7 @@ model Card {
   id          BigInt    @id @default(autoincrement())
   title       String?
   position    Int
-  list_id     BigInt
+  listId     BigInt
   list        List      @relation("ListCards", fields: [listId], references: [id])
   color       String?
   description String?

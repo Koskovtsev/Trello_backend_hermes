@@ -6,7 +6,7 @@ import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 
 import path from 'path';
-dotenv.config({ path: path.resolve(process.cwd(), '.env') });
+dotenv.config({ path: path.resolve(process.cwd(), '../.env') });
 
 // Перевірка завантаження ключів при старті
 if (!process.env.JWT_SECRET || !process.env.REFRESH_TOKEN_SECRET) {
@@ -480,7 +480,7 @@ app.post('/board/:id/card/', async (req: Request, res: Response): Promise<void> 
         title: title as string,
         description: description as string,
         listId: targetListId,
-        position: finalPosition,
+        position: finalPosition ?? 0,
         color: color as string,
         custom: ensureJsonString(custom),
         created_at: Date.now(),
