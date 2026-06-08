@@ -3,8 +3,8 @@ generator client {
 }
 
 datasource db {
-  provider = "sqlite"
-  url      = "file:./dev.db"
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
 }
 
 model User {
@@ -36,7 +36,7 @@ model BoardUser {
 model List {
   id        BigInt  @id @default(autoincrement())
   title     String
-  position  Int?
+  position  Int
   custom    String?
   boardId   BigInt
   board     Board   @relation("BoardLists", fields: [boardId], references: [id])
@@ -46,8 +46,8 @@ model List {
 model Card {
   id          BigInt    @id @default(autoincrement())
   title       String?
-  position    Int?
-  listId      BigInt
+  position    Int
+  list_id     BigInt
   list        List      @relation("ListCards", fields: [listId], references: [id])
   color       String?
   description String?

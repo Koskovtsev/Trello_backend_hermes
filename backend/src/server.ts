@@ -5,7 +5,16 @@ import dotenv from 'dotenv';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 
-dotenv.config();
+import path from 'path';
+dotenv.config({ path: path.resolve(process.cwd(), '.env') });
+
+// Перевірка завантаження ключів при старті
+if (!process.env.JWT_SECRET || !process.env.REFRESH_TOKEN_SECRET) {
+  console.error('❌ CRITICAL ERROR: JWT_SECRET or REFRESH_TOKEN_SECRET not found in .env file!');
+  process.exit(1);
+} else {
+  console.log('✅ Env secrets loaded successfully.');
+}
 
 interface BigIntJSON {
   toJSON(): number;
@@ -18,18 +27,14 @@ interface BigIntJSON {
 export const app = express();
 const port = process.env.PORT || 3001;
 
-const JWT_SECRET = process.env.JWT_SECRET || 'super-secret-key-123';
-const REFRESH_TOKEN_SECRET = process.env.REFRESH_TOKEN_SECRET || 'refresh-secret-key-456';
+const JWT_SECRET = process.env.JWT_SECRET!;
+const REFRESH_TOKEN_SECRET = process.env.REFRESH_TOKEN_SECRET!;
 
 app.use(cors());
 app.use(express.json());
 
 const prisma = new PrismaClient({
-  datasources: {
-    db: {
-      url: 'file:/mnt/i/AI/Trello_backend/backend/src/prisma/dev.db',
-    },
-  },
+  // Datasource configuration is now handled via DATABASE_URL env var
 });
 
 const authenticate = (req: Request, res: Response, next: NextFunction): void => {
@@ -38,20 +43,20 @@ const authenticate = (req: Request, res: Response, next: NextFunction): void => 
     next();
     return;
   }
-
+ 
   const authHeader = req.headers.authorization;
   if (!authHeader || !authHeader.startsWith('Bearer ')) {
-    res.status(401).json({ error: 'Unauthorized' });
+    sendResponse(res, 401, { error: 'Unauthorized' });
     return;
   }
-
+ 
   const token = authHeader.split(' ')[1];
   try {
-    const decoded = jwt.verify(token, JWT_SECRET) as { userId: number };
+    const decoded = jwt.verify(token, JWT_SECRET) as { userId: string };
     (req as any).userId = decoded.userId;
     next();
   } catch (err) {
-    res.status(401).json({ error: 'Unauthorized' });
+    sendResponse(res, 401, { error: 'Unauthorized' });
   }
 };
 
@@ -81,9 +86,42 @@ const ensureJsonObject = (val: unknown): Record<string, unknown> => {
   }
 };
 
+const mergeCustom = async (model: any, id: number, newCustom: unknown): Promise<string | null> => {
+  if (newCustom === null) return null;
+  if (typeof newCustom !== 'object' || newCustom === null) return ensureJsonString(newCustom);
+
+  const currentRecord = await model.findUnique({ where: { id } });
+  const currentCustom = ensureJsonObject(currentRecord?.custom);
+
+  const deepMerge = (target: any, source: any): any => {
+    for (const key in source) {
+      if (source[key] instanceof Object && key in target) {
+        Object.assign(source[key], deepMerge(target[key], source[key]));
+      }
+    }
+    Object.assign(target || {}, source);
+    return target;
+  };
+
+  const merged = deepMerge({ ...currentCustom }, { ...newCustom });
+  
+  return ensureJsonString(merged);
+};
+
 const getParam = (param: unknown): unknown => {
   if (Array.isArray(param)) return param[0];
   return param !== undefined && param !== null ? param : '';
+};
+
+const sendResponse = (res: Response, status: number, data: any) => {
+  res.setHeader('Content-Type', 'text/plain; charset=UTF-8');
+  res.status(status).send(JSON.stringify(data));
+};
+
+const sanitizeUser = (user: any) => {
+  if (!user) return null;
+  const { password, refreshToken, ...safeUser } = user;
+  return safeUser;
 };
 
 app.use(authenticate);
@@ -92,7 +130,7 @@ app.post('/user', async (req: Request, res: Response): Promise<void> => {
   try {
     const { email, password } = req.body as { email: string; password: string };
     if (!email || !password) {
-      res.status(400).json({ error: 'Email and password required' });
+      res.status(400).send(JSON.stringify({ error: 'Email and password required' }));
       return;
     }
 
@@ -105,13 +143,13 @@ app.post('/user', async (req: Request, res: Response): Promise<void> => {
         password: hashedPassword,
       },
     });
-    res.status(201).json({ result: 'Created', id: user.id });
+    res.status(201).send(JSON.stringify({ result: 'Created', id: user.id }));
   } catch (e) {
     const error = e as Error;
     if ('code' in error && (error as Record<string, unknown>).code === 'P2002') {
-      res.status(400).json({ error: 'User with this email already exists' });
+      sendResponse(res, 400, { error: 'User with this email already exists' });
     } else {
-      res.status(500).json({ error: error.message });
+      sendResponse(res, 500, { error: error.message });
     }
   }
 });
@@ -129,10 +167,10 @@ app.get('/user', async (req: Request, res: Response): Promise<void> => {
       },
       select: { id: true, username: true },
     });
-    res.status(200).json(users);
+    sendResponse(res, 200, users.map(u => sanitizeUser(u)));
   } catch (e) {
     const error = e as Error;
-    res.status(500).json({ error: error.message });
+    res.status(500).send(JSON.stringify({ error: error.message }));
   }
 });
 
@@ -140,24 +178,24 @@ app.post('/login', async (req: Request, res: Response): Promise<void> => {
   try {
     const { email, password } = req.body as { email: string; password: string };
     const user = await prisma.user.findUnique({ where: { email } });
-
+ 
     if (!user || !(await bcrypt.compare(password, (user as any).password))) {
-      res.status(401).json({ error: 'Invalid email or password' });
+      sendResponse(res, 401, { error: 'Invalid email or password' });
       return;
     }
-
-    const token = jwt.sign({ userId: user.id }, JWT_SECRET, { expiresIn: '5m' });
-    const refreshToken = jwt.sign({ userId: user.id }, REFRESH_TOKEN_SECRET, { expiresIn: '7d' });
-
+ 
+    const token = jwt.sign({ userId: user.id.toString() }, JWT_SECRET, { expiresIn: '5m' });
+    const refreshToken = jwt.sign({ userId: user.id.toString() }, REFRESH_TOKEN_SECRET, { expiresIn: '7d' });
+ 
     await prisma.user.update({
       where: { id: user.id },
       data: { refreshToken },
     });
-
-    res.status(200).json({ result: 'Authorized', token, refreshToken });
+ 
+    sendResponse(res, 200, { result: 'Authorized', token, refreshToken });
   } catch (e) {
     const error = e as Error;
-    res.status(500).json({ error: error.message });
+    sendResponse(res, 500, { error: error.message });
   }
 });
 
@@ -165,29 +203,43 @@ app.post('/refresh', async (req: Request, res: Response): Promise<void> => {
   try {
     const { refreshToken } = req.body as { refreshToken: string };
     if (!refreshToken) {
-      res.status(400).json({ error: 'Refresh token required' });
+      sendResponse(res, 400, { error: 'Refresh token required' });
       return;
     }
 
-    const decoded = jwt.verify(refreshToken, REFRESH_TOKEN_SECRET) as { userId: number };
-    const user = await prisma.user.findUnique({ where: { id: decoded.userId } });
+    console.log('--- Refresh Request ---');
+    console.log('Token from request length:', refreshToken.length);
 
-    if (!user || (user as any).refreshToken !== refreshToken) {
-      res.status(401).json({ error: 'Invalid refresh token' });
+    const decoded = jwt.verify(refreshToken, REFRESH_TOKEN_SECRET) as { userId: string };
+    const user = await prisma.user.findUnique({ where: { id: BigInt(decoded.userId) } });
+
+    if (!user) {
+      console.log('User not found in DB for ID:', decoded.userId);
+      sendResponse(res, 401, { error: 'Unauthorized' });
       return;
     }
 
-    const newToken = jwt.sign({ userId: user.id }, JWT_SECRET, { expiresIn: '5m' });
-    const newRefreshToken = jwt.sign({ userId: user.id }, REFRESH_TOKEN_SECRET, { expiresIn: '7d' });
+    console.log('Token from DB length:', user.refreshToken?.length);
+    console.log('Direct comparison:', user.refreshToken === refreshToken);
+
+    if (user.refreshToken !== refreshToken) {
+      console.log('Mismatch detected!');
+      sendResponse(res, 401, { error: 'Unauthorized' });
+      return;
+    }
+
+    const newToken = jwt.sign({ userId: user.id.toString() }, JWT_SECRET, { expiresIn: '5m' });
+    const newRefreshToken = jwt.sign({ userId: user.id.toString() }, REFRESH_TOKEN_SECRET, { expiresIn: '7d' });
 
     await prisma.user.update({
       where: { id: user.id },
       data: { refreshToken: newRefreshToken },
     });
 
-    res.status(200).json({ result: 'Authorized', token: newToken, refreshToken: newRefreshToken });
-  } catch {
-    res.status(401).json({ error: 'Invalid or expired refresh token' });
+    sendResponse(res, 200, { result: 'Authorized', token: newToken, refreshToken: newRefreshToken });
+  } catch (err) {
+    console.error('JWT Verify Error:', err);
+    sendResponse(res, 401, { error: 'Unauthorized' });
   }
 });
 
@@ -198,7 +250,7 @@ app.get('/board/', async (req: Request, res: Response): Promise<void> => {
       where: { userId },
       include: { board: true },
     });
-    res.status(200).json({
+    sendResponse(res, 200, {
       boards: boards.map((bu) => ({
         ...bu.board,
         custom: ensureJsonObject(bu.board.custom),
@@ -206,7 +258,7 @@ app.get('/board/', async (req: Request, res: Response): Promise<void> => {
     });
   } catch (e) {
     const error = e as Error;
-    res.status(500).json({ error: error.message });
+    sendResponse(res, 500, { error: error.message });
   }
 });
 
@@ -232,16 +284,16 @@ app.get('/board/:id', async (req: Request, res: Response): Promise<void> => {
         },
       },
     });
-
+ 
     if (!board) {
-      res.status(404).json({ error: 'Board not found' });
+      sendResponse(res, 404, { error: 'Board not found' });
       return;
     }
-
+ 
     const boardData = {
       ...board,
       custom: ensureJsonObject(board.custom),
-      users: board.users.map((bu) => bu.user),
+      users: board.users.map((bu) => sanitizeUser(bu.user)),
       lists: board.lists.map((list) => ({
         ...list,
         custom: ensureJsonObject(list.custom),
@@ -254,11 +306,11 @@ app.get('/board/:id', async (req: Request, res: Response): Promise<void> => {
         })),
       })),
     };
-
-    res.status(200).json(boardData);
+ 
+    sendResponse(res, 200, boardData);
   } catch (e) {
     const error = e as Error;
-    res.status(500).json({ error: error.message });
+    sendResponse(res, 500, { error: error.message });
   }
 });
 
@@ -276,10 +328,10 @@ app.post('/board/', async (req: Request, res: Response): Promise<void> => {
         },
       },
     });
-    res.status(201).json({ result: 'Created', id: board.id });
+    res.status(201).send(JSON.stringify({ result: 'Created', id: board.id }));
   } catch (e) {
     const error = e as Error;
-    res.status(500).json({ error: error.message });
+    res.status(500).send(JSON.stringify({ error: error.message }));
   }
 });
 
@@ -288,16 +340,20 @@ app.put('/board/:id', async (req: Request, res: Response): Promise<void> => {
     const { title, custom } = req.body as { title?: string; custom?: unknown };
     const data: Record<string, unknown> = {};
     if (title !== undefined) data.title = title;
-    if (custom !== undefined) data.custom = ensureJsonString(custom);
+    
+    if (custom !== undefined) {
+      data.custom = await mergeCustom(prisma.board, Number(getParam(req.params.id)), custom);
+    }
 
     await prisma.board.update({
       where: { id: Number(getParam(req.params.id)) },
       data,
     });
-    res.status(200).json({ result: 'Updated' });
+    res.setHeader('Content-Type', 'text/plain; charset=UTF-8');
+    res.status(200).send(JSON.stringify({ result: 'Updated' }));
   } catch (e) {
     const error = e as Error;
-    res.status(500).json({ error: error.message });
+    res.status(500).send(JSON.stringify({ error: error.message }));
   }
 });
 
@@ -309,10 +365,10 @@ app.delete('/board/:id', async (req: Request, res: Response): Promise<void> => {
     await prisma.card.deleteMany({ where: { list: { boardId } } });
     await prisma.list.deleteMany({ where: { boardId } });
     await prisma.board.delete({ where: { id: boardId } });
-    res.status(200).json({ result: 'Deleted' });
+    res.status(200).send(JSON.stringify({ result: 'Deleted' }));
   } catch (e) {
     const error = e as Error;
-    res.status(500).json({ error: error.message });
+    res.status(500).send(JSON.stringify({ error: error.message }));
   }
 });
 
@@ -323,10 +379,10 @@ app.post('/board/:id/list/', async (req: Request, res: Response): Promise<void> 
     const list = await prisma.list.create({
       data: { id: Date.now(), title, position, boardId },
     });
-    res.status(201).json({ result: 'Created', id: list.id });
+    res.status(201).send(JSON.stringify({ result: 'Created', id: list.id }));
   } catch (e) {
     const error = e as Error;
-    res.status(500).json({ error: error.message });
+    res.status(500).send(JSON.stringify({ error: error.message }));
   }
 });
 
@@ -338,12 +394,14 @@ app.put('/board/:id/list/', async (req: Request, res: Response): Promise<void> =
       return;
     }
 
-    const updatePromises = lists.map((listItem) => {
+    const updatePromises = lists.map(async (listItem) => {
       const data: Record<string, unknown> = {};
       const item = listItem as Record<string, unknown>;
       if (item.title !== undefined) data.title = item.title;
       if (item.position !== undefined) data.position = item.position;
-      if (item.custom !== undefined) data.custom = ensureJsonString(item.custom);
+      if (item.custom !== undefined) {
+        data.custom = await mergeCustom(prisma.list, Number(getParam(item.id)), item.custom);
+      }
       return prisma.list.update({
         where: { id: Number(getParam(item.id)) },
         data,
@@ -351,10 +409,11 @@ app.put('/board/:id/list/', async (req: Request, res: Response): Promise<void> =
     });
 
     await Promise.all(updatePromises);
-    res.status(200).json({ result: 'Updated' });
+    res.setHeader('Content-Type', 'text/plain; charset=UTF-8');
+    res.status(200).send(JSON.stringify({ result: 'Updated' }));
   } catch (e) {
     const error = e as Error;
-    res.status(500).json({ error: error.message });
+    res.status(500).send(JSON.stringify({ error: error.message }));
   }
 });
 
@@ -369,20 +428,20 @@ app.put('/board/:id/list/:listId', async (req: Request, res: Response): Promise<
       where: { id: Number(getParam(req.params.listId)) },
       data,
     });
-    res.status(200).json({ result: 'Updated' });
+    res.status(200).send(JSON.stringify({ result: 'Updated' }));
   } catch (e) {
     const error = e as Error;
-    res.status(500).json({ error: error.message });
+    res.status(500).send(JSON.stringify({ error: error.message }));
   }
 });
 
 app.delete('/board/:id/list/:listId', async (req: Request, res: Response): Promise<void> => {
   try {
     await prisma.list.delete({ where: { id: Number(getParam(req.params.listId)) } });
-    res.status(200).json({ result: 'Deleted' });
+    res.status(200).send(JSON.stringify({ result: 'Deleted' }));
   } catch (e) {
     const error = e as Error;
-    res.status(500).json({ error: error.message });
+    res.status(500).send(JSON.stringify({ error: error.message }));
   }
 });
 
@@ -427,10 +486,10 @@ app.post('/board/:id/card/', async (req: Request, res: Response): Promise<void> 
         created_at: Date.now(),
       },
     });
-    res.status(201).json({ result: 'Created', id: card.id });
+    res.status(201).send(JSON.stringify({ result: 'Created', id: card.id }));
   } catch (e) {
     const error = e as Error;
-    res.status(500).json({ error: error.message });
+    res.status(500).send(JSON.stringify({ error: error.message }));
   }
 });
 
@@ -442,7 +501,7 @@ app.put('/board/:id/card/', async (req: Request, res: Response): Promise<void> =
       return;
     }
 
-    const updatePromises = cards.map((card) => {
+    const updatePromises = cards.map(async (card) => {
       const item = card as Record<string, unknown>;
       const { listId, list_id: listIdFromBody } = item;
       const listIdValue = listIdFromBody !== undefined ? listIdFromBody : listId;
@@ -453,7 +512,9 @@ app.put('/board/:id/card/', async (req: Request, res: Response): Promise<void> =
       if (item.position !== undefined) data.position = item.position;
       if (item.color !== undefined) data.color = item.color;
       if (listIdValue !== undefined) data.listId = String(listIdValue);
-      if (item.custom !== undefined) data.custom = ensureJsonString(item.custom);
+      if (item.custom !== undefined) {
+        data.custom = await mergeCustom(prisma.card, Number(getParam(item.id)), item.custom);
+      }
 
       return prisma.card.update({
         where: { id: Number(getParam(item.id)) },
@@ -462,10 +523,11 @@ app.put('/board/:id/card/', async (req: Request, res: Response): Promise<void> =
     });
 
     await Promise.all(updatePromises);
-    res.status(200).json({ result: 'Updated' });
+    res.setHeader('Content-Type', 'text/plain; charset=UTF-8');
+    res.status(200).send(JSON.stringify({ result: 'Updated' }));
   } catch (e) {
     const error = e as Error;
-    res.status(500).json({ error: error.message });
+    res.status(500).send(JSON.stringify({ error: error.message }));
   }
 });
 
@@ -486,27 +548,30 @@ app.put('/board/:id/card/:cardId', async (req: Request, res: Response): Promise<
     if (description !== undefined) data.description = description;
     if (position !== undefined) data.position = position;
     if (color !== undefined) data.color = color;
-    if (custom !== undefined) data.custom = ensureJsonString(custom);
+    if (custom !== undefined) {
+      data.custom = await mergeCustom(prisma.card, cardId, custom);
+    }
     if (listIdFromBody !== undefined) data.listId = String(listIdFromBody);
 
     await prisma.card.update({
       where: { id: cardId },
       data,
     });
-    res.status(200).json({ result: 'Updated' });
+    res.setHeader('Content-Type', 'text/plain; charset=UTF-8');
+    res.status(200).send(JSON.stringify({ result: 'Updated' }));
   } catch (e) {
     const error = e as Error;
-    res.status(500).json({ error: error.message });
+    res.status(500).send(JSON.stringify({ error: error.message }));
   }
 });
 
 app.delete('/board/:id/card/:cardId', async (req: Request, res: Response): Promise<void> => {
   try {
     await prisma.card.delete({ where: { id: Number(getParam(req.params.cardId)) } });
-    res.status(200).json({ result: 'Deleted' });
+    res.status(200).send(JSON.stringify({ result: 'Deleted' }));
   } catch (e) {
     const error = e as Error;
-    res.status(500).json({ error: error.message });
+    res.status(500).send(JSON.stringify({ error: error.message }));
   }
 });
 
@@ -532,10 +597,10 @@ app.put('/board/:id/card/:cardId/users', async (req: Request, res: Response): Pr
       await prisma.$transaction(operations);
     }
 
-    res.status(200).json({ result: 'Updated' });
+    res.status(200).send(JSON.stringify({ result: 'Updated' }));
   } catch (e) {
     const error = e as Error;
-    res.status(500).json({ error: error.message });
+    res.status(500).send(JSON.stringify({ error: error.message }));
   }
 });
 
