@@ -33,9 +33,26 @@ const REFRESH_TOKEN_SECRET = process.env.REFRESH_TOKEN_SECRET!;
 app.use(cors());
 app.use(express.json());
 
+// Нормалізація шляхів: прибираємо кінцевий слеш, щоб /user/password/ працював як /user/password
+app.use((req, res, next) => {
+  if (req.path.length > 1 && req.path.endsWith('/')) {
+    req.url = req.url.slice(0, -1);
+  }
+  next();
+});
+
 const prisma = new PrismaClient({
   // Datasource configuration is now handled via DATABASE_URL env var
 });
+
+const sendResponse = (res: Response, status: number, data: any) => {
+  res.setHeader('Content-Type', 'text/plain; charset=UTF-8');
+  res.status(status).send(JSON.stringify(data));
+};
+
+const sendError = (res: Response, status: number, message: string) => {
+  sendResponse(res, status, { error: message });
+};
 
 const authenticate = (req: Request, res: Response, next: NextFunction): void => {
   const path = req.path.replace(/\/$/, '') || '/';
@@ -46,7 +63,7 @@ const authenticate = (req: Request, res: Response, next: NextFunction): void => 
  
   const authHeader = req.headers.authorization;
   if (!authHeader || !authHeader.startsWith('Bearer ')) {
-    sendResponse(res, 401, { error: 'Unauthorized' });
+    sendError(res, 401, 'Unauthorized');
     return;
   }
  
@@ -56,7 +73,7 @@ const authenticate = (req: Request, res: Response, next: NextFunction): void => 
     (req as any).userId = decoded.userId;
     next();
   } catch (err) {
-    sendResponse(res, 401, { error: 'Unauthorized' });
+    sendError(res, 401, 'Unauthorized');
   }
 };
 
@@ -86,6 +103,11 @@ const ensureJsonObject = (val: unknown): Record<string, unknown> => {
   }
 };
 
+const sanitizeUser = (user: any) => {
+  const { password, refreshToken, ...rest } = user;
+  return rest;
+};
+
 const mergeCustom = async (model: any, id: number, newCustom: unknown): Promise<string | null> => {
   if (newCustom === null) return null;
   if (typeof newCustom !== 'object' || newCustom === null) return ensureJsonString(newCustom);
@@ -111,29 +133,15 @@ const mergeCustom = async (model: any, id: number, newCustom: unknown): Promise<
 const getParam = (param: unknown): unknown => {
   if (Array.isArray(param)) return param[0];
   return param !== undefined && param !== null ? param : '';
-};
-
-const sendResponse = (res: Response, status: number, data: any) => {
-  res.setHeader('Content-Type', 'text/plain; charset=UTF-8');
-  res.status(status).send(JSON.stringify(data));
-};
-
-const sanitizeUser = (user: any) => {
-  if (!user) return null;
-  const { password, refreshToken, ...safeUser } = user;
-  return safeUser;
-};
-
-app.use(authenticate);
+}
 
 app.post('/user', async (req: Request, res: Response): Promise<void> => {
   try {
     const { email, password } = req.body as { email: string; password: string };
     if (!email || !password) {
-      res.status(400).send(JSON.stringify({ error: 'Email and password required' }));
+      sendError(res, 400, 'Email and password required');
       return;
     }
-
     const hashedPassword = await bcrypt.hash(password, 10);
     const user = await prisma.user.create({
       data: {
@@ -147,9 +155,9 @@ app.post('/user', async (req: Request, res: Response): Promise<void> => {
   } catch (e) {
     const error = e as Error;
     if ('code' in error && (error as Record<string, unknown>).code === 'P2002') {
-      sendResponse(res, 400, { error: 'User with this email already exists' });
+      sendError(res, 400, 'User with this email already exists');
     } else {
-      sendResponse(res, 500, { error: error.message });
+      sendError(res, 500, error.message);
     }
   }
 });
@@ -158,7 +166,7 @@ app.get('/user', async (req: Request, res: Response): Promise<void> => {
   try {
     const { emailOrUsername } = req.query as { emailOrUsername: string };
     if (!emailOrUsername) {
-      res.status(400).json({ error: 'emailOrUsername query parameter required' });
+      sendError(res, 400, 'emailOrUsername query parameter required');
       return;
     }
     const users = await prisma.user.findMany({
@@ -167,10 +175,35 @@ app.get('/user', async (req: Request, res: Response): Promise<void> => {
       },
       select: { id: true, username: true },
     });
+app.put('/user/password', async (req: Request, res: Response): Promise<void> => {
+  try {
+    const { userId } = req as any;
+    const { oldPassword, newPassword } = req.body as { oldPassword: string; newPassword: string };
+    if (!oldPassword || !newPassword) {
+      sendError(res, 400, 'Old and new passwords are required');
+      return;
+    }
+    const user = await prisma.user.findUnique({ where: { id: Number(userId) } });
+    if (!user || !(await bcrypt.compare(oldPassword, user.password))) {
+      sendError(res, 400, 'Incorrect old password');
+      return;
+    }
+    const hashedNewPassword = await bcrypt.hash(newPassword, 10);
+    await prisma.user.update({
+      where: { id: user.id },
+      data: { password: hashedNewPassword },
+    });
+    res.setHeader('Content-Type', 'text/plain; charset=UTF-8');
+    res.status(200).send(JSON.stringify({ result: 'Updated' }));
+  } catch (e) {
+    const error = e as Error;
+    sendError(res, 500, error.message);
+  }
+});
     sendResponse(res, 200, users.map(u => sanitizeUser(u)));
   } catch (e) {
     const error = e as Error;
-    res.status(500).send(JSON.stringify({ error: error.message }));
+    sendError(res, 500, error.message);
   }
 });
 
@@ -180,7 +213,7 @@ app.post('/login', async (req: Request, res: Response): Promise<void> => {
     const user = await prisma.user.findUnique({ where: { email } });
  
     if (!user || !(await bcrypt.compare(password, (user as any).password))) {
-      sendResponse(res, 401, { error: 'Invalid email or password' });
+      sendError(res, 401, 'Invalid email or password');
       return;
     }
  
@@ -195,7 +228,7 @@ app.post('/login', async (req: Request, res: Response): Promise<void> => {
     sendResponse(res, 200, { result: 'Authorized', token, refreshToken });
   } catch (e) {
     const error = e as Error;
-    sendResponse(res, 500, { error: error.message });
+    sendError(res, 500, error.message);
   }
 });
 
@@ -203,7 +236,7 @@ app.post('/refresh', async (req: Request, res: Response): Promise<void> => {
   try {
     const { refreshToken } = req.body as { refreshToken: string };
     if (!refreshToken) {
-      sendResponse(res, 400, { error: 'Refresh token required' });
+      sendError(res, 400, 'Refresh token required');
       return;
     }
 
@@ -215,7 +248,7 @@ app.post('/refresh', async (req: Request, res: Response): Promise<void> => {
 
     if (!user) {
       console.log('User not found in DB for ID:', decoded.userId);
-      sendResponse(res, 401, { error: 'Unauthorized' });
+      sendError(res, 401, 'Unauthorized');
       return;
     }
 
@@ -224,7 +257,7 @@ app.post('/refresh', async (req: Request, res: Response): Promise<void> => {
 
     if (user.refreshToken !== refreshToken) {
       console.log('Mismatch detected!');
-      sendResponse(res, 401, { error: 'Unauthorized' });
+      sendError(res, 401, 'Unauthorized');
       return;
     }
 
@@ -239,7 +272,7 @@ app.post('/refresh', async (req: Request, res: Response): Promise<void> => {
     sendResponse(res, 200, { result: 'Authorized', token: newToken, refreshToken: newRefreshToken });
   } catch (err) {
     console.error('JWT Verify Error:', err);
-    sendResponse(res, 401, { error: 'Unauthorized' });
+    sendError(res, 401, 'Unauthorized');
   }
 });
 
@@ -258,7 +291,7 @@ app.get('/board/', async (req: Request, res: Response): Promise<void> => {
     });
   } catch (e) {
     const error = e as Error;
-    sendResponse(res, 500, { error: error.message });
+    sendError(res, 500, error.message);
   }
 });
 
@@ -286,7 +319,7 @@ app.get('/board/:id', async (req: Request, res: Response): Promise<void> => {
     });
  
     if (!board) {
-      sendResponse(res, 404, { error: 'Board not found' });
+      sendError(res, 404, 'Board not found');
       return;
     }
  
@@ -310,7 +343,7 @@ app.get('/board/:id', async (req: Request, res: Response): Promise<void> => {
     sendResponse(res, 200, boardData);
   } catch (e) {
     const error = e as Error;
-    sendResponse(res, 500, { error: error.message });
+    sendError(res, 500, error.message);
   }
 });
 
@@ -331,7 +364,7 @@ app.post('/board/', async (req: Request, res: Response): Promise<void> => {
     res.status(201).send(JSON.stringify({ result: 'Created', id: board.id }));
   } catch (e) {
     const error = e as Error;
-    res.status(500).send(JSON.stringify({ error: error.message }));
+    sendError(res, 500, error.message);
   }
 });
 
@@ -353,7 +386,7 @@ app.put('/board/:id', async (req: Request, res: Response): Promise<void> => {
     res.status(200).send(JSON.stringify({ result: 'Updated' }));
   } catch (e) {
     const error = e as Error;
-    res.status(500).send(JSON.stringify({ error: error.message }));
+    sendError(res, 500, error.message);
   }
 });
 
@@ -368,7 +401,7 @@ app.delete('/board/:id', async (req: Request, res: Response): Promise<void> => {
     res.status(200).send(JSON.stringify({ result: 'Deleted' }));
   } catch (e) {
     const error = e as Error;
-    res.status(500).send(JSON.stringify({ error: error.message }));
+    sendError(res, 500, error.message);
   }
 });
 
@@ -382,7 +415,7 @@ app.post('/board/:id/list/', async (req: Request, res: Response): Promise<void> 
     res.status(201).send(JSON.stringify({ result: 'Created', id: list.id }));
   } catch (e) {
     const error = e as Error;
-    res.status(500).send(JSON.stringify({ error: error.message }));
+    sendError(res, 500, error.message);
   }
 });
 
@@ -390,7 +423,7 @@ app.put('/board/:id/list/', async (req: Request, res: Response): Promise<void> =
   try {
     const lists = req.body as unknown[];
     if (!Array.isArray(lists)) {
-      res.status(400).json({ error: 'Expected an array of lists' });
+      sendError(res, 400, 'Expected an array of lists');
       return;
     }
 
@@ -413,7 +446,7 @@ app.put('/board/:id/list/', async (req: Request, res: Response): Promise<void> =
     res.status(200).send(JSON.stringify({ result: 'Updated' }));
   } catch (e) {
     const error = e as Error;
-    res.status(500).send(JSON.stringify({ error: error.message }));
+    sendError(res, 500, error.message);
   }
 });
 
@@ -431,7 +464,7 @@ app.put('/board/:id/list/:listId', async (req: Request, res: Response): Promise<
     res.status(200).send(JSON.stringify({ result: 'Updated' }));
   } catch (e) {
     const error = e as Error;
-    res.status(500).send(JSON.stringify({ error: error.message }));
+    sendError(res, 500, error.message);
   }
 });
 
@@ -441,7 +474,7 @@ app.delete('/board/:id/list/:listId', async (req: Request, res: Response): Promi
     res.status(200).send(JSON.stringify({ result: 'Deleted' }));
   } catch (e) {
     const error = e as Error;
-    res.status(500).send(JSON.stringify({ error: error.message }));
+    sendError(res, 500, error.message);
   }
 });
 
@@ -459,7 +492,7 @@ app.post('/board/:id/card/', async (req: Request, res: Response): Promise<void> 
 
     const listIdValue = listIdFromBody !== undefined ? listIdFromBody : listId;
     if (!listIdValue) {
-      res.status(400).json({ error: 'Invalid or missing list ID' });
+      sendError(res, 400, 'Invalid or missing list ID');
       return;
     }
 
@@ -489,7 +522,7 @@ app.post('/board/:id/card/', async (req: Request, res: Response): Promise<void> 
     res.status(201).send(JSON.stringify({ result: 'Created', id: card.id }));
   } catch (e) {
     const error = e as Error;
-    res.status(500).send(JSON.stringify({ error: error.message }));
+    sendError(res, 500, error.message);
   }
 });
 
@@ -497,7 +530,7 @@ app.put('/board/:id/card/', async (req: Request, res: Response): Promise<void> =
   try {
     const cards = req.body as unknown[];
     if (!Array.isArray(cards)) {
-      res.status(400).json({ error: 'Expected an array of cards' });
+      sendError(res, 400, 'Expected an array of cards');
       return;
     }
 
@@ -527,7 +560,7 @@ app.put('/board/:id/card/', async (req: Request, res: Response): Promise<void> =
     res.status(200).send(JSON.stringify({ result: 'Updated' }));
   } catch (e) {
     const error = e as Error;
-    res.status(500).send(JSON.stringify({ error: error.message }));
+    sendError(res, 500, error.message);
   }
 });
 
@@ -561,7 +594,7 @@ app.put('/board/:id/card/:cardId', async (req: Request, res: Response): Promise<
     res.status(200).send(JSON.stringify({ result: 'Updated' }));
   } catch (e) {
     const error = e as Error;
-    res.status(500).send(JSON.stringify({ error: error.message }));
+    sendError(res, 500, error.message);
   }
 });
 
@@ -571,7 +604,7 @@ app.delete('/board/:id/card/:cardId', async (req: Request, res: Response): Promi
     res.status(200).send(JSON.stringify({ result: 'Deleted' }));
   } catch (e) {
     const error = e as Error;
-    res.status(500).send(JSON.stringify({ error: error.message }));
+    sendError(res, 500, error.message);
   }
 });
 
@@ -600,7 +633,7 @@ app.put('/board/:id/card/:cardId/users', async (req: Request, res: Response): Pr
     res.status(200).send(JSON.stringify({ result: 'Updated' }));
   } catch (e) {
     const error = e as Error;
-    res.status(500).send(JSON.stringify({ error: error.message }));
+    sendError(res, 500, error.message);
   }
 });
 
