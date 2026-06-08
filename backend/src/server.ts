@@ -377,7 +377,7 @@ app.post('/board/:id/list/', async (req: Request, res: Response): Promise<void> 
     const boardId = Number(getParam(req.params.id));
     const { title, position } = req.body as { title: string; position?: number };
     const list = await prisma.list.create({
-      data: { id: Date.now(), title, position, boardId },
+      data: { id: Date.now(), title, position: position ?? 0, boardId },
     });
     res.status(201).send(JSON.stringify({ result: 'Created', id: list.id }));
   } catch (e) {
