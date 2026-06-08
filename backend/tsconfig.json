@@ -5,6 +5,7 @@
     "strict": true,
     "esModuleInterop": true,
     "skipLibCheck": true,
+    "rootDir": "src",
     "outDir": "./dist",
     "types": ["jest", "node"],
     "jsx": "react-jsx"
