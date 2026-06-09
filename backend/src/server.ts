@@ -182,7 +182,7 @@ app.get('/user', async (req: Request, res: Response): Promise<void> => {
   }
 });
 
-app.put('/user/password', async (req: Request, res: Response): Promise<void> => {
+app.put('/user/password', authenticate, async (req: Request, res: Response): Promise<void> => {
   try {
     const { userId } = req as any;
     const { oldPassword, newPassword } = req.body as { oldPassword: string; newPassword: string };
@@ -190,7 +190,7 @@ app.put('/user/password', async (req: Request, res: Response): Promise<void> => 
       sendError(res, 400, 'Old and new passwords are required');
       return;
     }
-    const user = await prisma.user.findUnique({ where: { id: Number(userId) } });
+    const user = await prisma.user.findUnique({ where: { id: BigInt(userId) } });
     if (!user || !(await bcrypt.compare(oldPassword, user.password))) {
       sendError(res, 400, 'Incorrect old password');
       return;
