@@ -175,6 +175,13 @@ app.get('/user', async (req: Request, res: Response): Promise<void> => {
       },
       select: { id: true, username: true },
     });
+    sendResponse(res, 200, users.map(u => sanitizeUser(u)));
+  } catch (e) {
+    const error = e as Error;
+    sendError(res, 500, error.message);
+  }
+});
+
 app.put('/user/password', async (req: Request, res: Response): Promise<void> => {
   try {
     const { userId } = req as any;
@@ -195,12 +202,6 @@ app.put('/user/password', async (req: Request, res: Response): Promise<void> => 
     });
     res.setHeader('Content-Type', 'text/plain; charset=UTF-8');
     res.status(200).send(JSON.stringify({ result: 'Updated' }));
-  } catch (e) {
-    const error = e as Error;
-    sendError(res, 500, error.message);
-  }
-});
-    sendResponse(res, 200, users.map(u => sanitizeUser(u)));
   } catch (e) {
     const error = e as Error;
     sendError(res, 500, error.message);
