@@ -4,6 +4,7 @@ import cors from 'cors';
 import dotenv from 'dotenv';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
+import { sendResetEmail } from './utils/mail';
 
 import path from 'path';
 dotenv.config({ path: path.resolve(process.cwd(), '../.env') });
@@ -208,13 +209,78 @@ app.put('/user/password', authenticate, async (req: Request, res: Response): Pro
   }
 });
 
+app.post('/user/forgot-password', async (req: Request, res: Response): Promise<void> => {
+  try {
+    const { email } = req.body as { email: string };
+    if (!email) {
+      sendError(res, 400, 'Email is required');
+      return;
+    }
+    const user = await prisma.user.findUnique({ where: { email } });
+    if (!user) {
+      sendResponse(res, 200, { result: 'Sent' });
+      return;
+    }
+    const resetToken = jwt.sign({ userId: user.id.toString() }, JWT_SECRET, { expiresIn: '1h' });
+    const expires = new Date(Date.now() + 60 * 60 * 1000);
+    await prisma.user.update({
+      where: { id: user.id },
+      data: { resetToken, resetTokenExpires: expires },
+    });
+    console.log(`\x1b[33m[Password Reset]\x1b[0m Email: ${email}, Token: ${resetToken}`);
+    try {
+      await sendResetEmail(email, resetToken);
+    } catch (mailError) {
+      console.error('\x1b[31m[Mail Error]\x1b[0m Failed to send email:', mailError);
+    }
+    sendResponse(res, 200, { result: 'Sent' });
+  } catch (e) {
+    const error = e as Error;
+    sendError(res, 500, error.message);
+  }
+});
+
+app.put('/user/reset-password', async (req: Request, res: Response): Promise<void> => {
+  try {
+    const { token, newPassword } = req.body as { token: string; newPassword: string };
+    if (!token || !newPassword) {
+      sendError(res, 400, 'Token and new password are required');
+      return;
+    }
+    const decoded = jwt.verify(token, JWT_SECRET) as { userId: string };
+    const user = await prisma.user.findUnique({ where: { id: BigInt(decoded.userId) } });
+    if (!user || user.resetToken !== token || (user.resetTokenExpires && user.resetTokenExpires < new Date())) {
+      sendError(res, 400, 'Invalid or expired token');
+      return;
+    }
+    const hashedNewPassword = await bcrypt.hash(newPassword, 10);
+    await prisma.user.update({
+      where: { id: user.id },
+      data: { 
+        password: hashedNewPassword,
+        resetToken: null,
+        resetTokenExpires: null
+      },
+    });
+    res.setHeader('Content-Type', 'text/plain; charset=UTF-8');
+    res.status(200).send(JSON.stringify({ result: 'Updated' }));
+  } catch (e) {
+    if (e instanceof jwt.JsonWebTokenError) {
+      sendError(res, 400, 'Invalid token');
+    } else {
+      const error = e as Error;
+      sendError(res, 500, error.message);
+    }
+  }
+});
+
 app.post('/login', async (req: Request, res: Response): Promise<void> => {
   try {
     const { email, password } = req.body as { email: string; password: string };
     const user = await prisma.user.findUnique({ where: { email } });
  
     if (!user || !(await bcrypt.compare(password, (user as any).password))) {
-      sendError(res, 401, 'Invalid email or password');
+      sendError(res, 400, 'Invalid email or password');
       return;
     }
  
@@ -277,11 +343,11 @@ app.post('/refresh', async (req: Request, res: Response): Promise<void> => {
   }
 });
 
-app.get('/board/', async (req: Request, res: Response): Promise<void> => {
+app.get('/board/', authenticate, async (req: Request, res: Response): Promise<void> => {
   try {
     const { userId } = req as any;
     const boards = await prisma.boardUser.findMany({
-      where: { userId },
+      where: { userId: BigInt(userId) },
       include: { board: true },
     });
     sendResponse(res, 200, {
@@ -296,14 +362,14 @@ app.get('/board/', async (req: Request, res: Response): Promise<void> => {
   }
 });
 
-app.get('/board/:id', async (req: Request, res: Response): Promise<void> => {
+app.get('/board/:id', authenticate, async (req: Request, res: Response): Promise<void> => {
   try {
     const { userId } = req as any;
     const boardId = Number(getParam(req.params.id));
     const board = await prisma.board.findFirst({
       where: {
         id: boardId,
-        users: { some: { userId } },
+        users: { some: { userId: BigInt(userId) } },
       },
       include: {
         users: { include: { user: true } },
@@ -348,7 +414,7 @@ app.get('/board/:id', async (req: Request, res: Response): Promise<void> => {
   }
 });
 
-app.post('/board/', async (req: Request, res: Response): Promise<void> => {
+app.post('/board/', authenticate, async (req: Request, res: Response): Promise<void> => {
   try {
     const { userId } = req as any;
     const { title, custom } = req.body as { title: string; custom?: unknown };
@@ -358,7 +424,7 @@ app.post('/board/', async (req: Request, res: Response): Promise<void> => {
         title,
         custom: ensureJsonString(custom),
         users: {
-          create: { userId },
+          create: { userId: BigInt(userId) },
         },
       },
     });
@@ -369,18 +435,29 @@ app.post('/board/', async (req: Request, res: Response): Promise<void> => {
   }
 });
 
-app.put('/board/:id', async (req: Request, res: Response): Promise<void> => {
+app.put('/board/:id', authenticate, async (req: Request, res: Response): Promise<void> => {
   try {
+    const { userId } = req as any;
+    const boardId = Number(getParam(req.params.id));
     const { title, custom } = req.body as { title?: string; custom?: unknown };
+    
+    const board = await prisma.board.findFirst({
+      where: { id: boardId, users: { some: { userId: BigInt(userId) } } }
+    });
+    if (!board) {
+      sendError(res, 404, 'Board not found or access denied');
+      return;
+    }
+
     const data: Record<string, unknown> = {};
     if (title !== undefined) data.title = title;
     
     if (custom !== undefined) {
-      data.custom = await mergeCustom(prisma.board, Number(getParam(req.params.id)), custom);
+      data.custom = await mergeCustom(prisma.board, boardId, custom);
     }
 
     await prisma.board.update({
-      where: { id: Number(getParam(req.params.id)) },
+      where: { id: boardId },
       data,
     });
     res.setHeader('Content-Type', 'text/plain; charset=UTF-8');
@@ -391,9 +468,19 @@ app.put('/board/:id', async (req: Request, res: Response): Promise<void> => {
   }
 });
 
-app.delete('/board/:id', async (req: Request, res: Response): Promise<void> => {
+app.delete('/board/:id', authenticate, async (req: Request, res: Response): Promise<void> => {
   try {
+    const { userId } = req as any;
     const boardId = Number(getParam(req.params.id));
+    
+    const board = await prisma.board.findFirst({
+      where: { id: boardId, users: { some: { userId: BigInt(userId) } } }
+    });
+    if (!board) {
+      sendError(res, 404, 'Board not found or access denied');
+      return;
+    }
+
     await prisma.cardUser.deleteMany({ where: { card: { list: { boardId } } } });
     await prisma.boardUser.deleteMany({ where: { boardId } });
     await prisma.card.deleteMany({ where: { list: { boardId } } });
@@ -406,9 +493,19 @@ app.delete('/board/:id', async (req: Request, res: Response): Promise<void> => {
   }
 });
 
-app.post('/board/:id/list/', async (req: Request, res: Response): Promise<void> => {
+app.post('/board/:id/list/', authenticate, async (req: Request, res: Response): Promise<void> => {
   try {
+    const { userId } = req as any;
     const boardId = Number(getParam(req.params.id));
+    
+    const board = await prisma.board.findFirst({
+      where: { id: boardId, users: { some: { userId: BigInt(userId) } } }
+    });
+    if (!board) {
+      sendError(res, 404, 'Board not found or access denied');
+      return;
+    }
+
     const { title, position } = req.body as { title: string; position?: number };
     const list = await prisma.list.create({
       data: { id: Date.now(), title, position: position ?? 0, boardId },
@@ -420,8 +517,19 @@ app.post('/board/:id/list/', async (req: Request, res: Response): Promise<void> 
   }
 });
 
-app.put('/board/:id/list/', async (req: Request, res: Response): Promise<void> => {
+app.put('/board/:id/list/', authenticate, async (req: Request, res: Response): Promise<void> => {
   try {
+    const { userId } = req as any;
+    const boardId = Number(getParam(req.params.id));
+    
+    const board = await prisma.board.findFirst({
+      where: { id: boardId, users: { some: { userId: BigInt(userId) } } }
+    });
+    if (!board) {
+      sendError(res, 404, 'Board not found or access denied');
+      return;
+    }
+
     const lists = req.body as unknown[];
     if (!Array.isArray(lists)) {
       sendError(res, 400, 'Expected an array of lists');
@@ -451,8 +559,19 @@ app.put('/board/:id/list/', async (req: Request, res: Response): Promise<void> =
   }
 });
 
-app.put('/board/:id/list/:listId', async (req: Request, res: Response): Promise<void> => {
+app.put('/board/:id/list/:listId', authenticate, async (req: Request, res: Response): Promise<void> => {
   try {
+    const { userId } = req as any;
+    const boardId = Number(getParam(req.params.id));
+    
+    const board = await prisma.board.findFirst({
+      where: { id: boardId, users: { some: { userId: BigInt(userId) } } }
+    });
+    if (!board) {
+      sendError(res, 404, 'Board not found or access denied');
+      return;
+    }
+
     const { title, position } = req.body as { title?: string; position?: number };
     const data: Record<string, unknown> = {};
     if (title !== undefined) data.title = title;
@@ -469,8 +588,19 @@ app.put('/board/:id/list/:listId', async (req: Request, res: Response): Promise<
   }
 });
 
-app.delete('/board/:id/list/:listId', async (req: Request, res: Response): Promise<void> => {
+app.delete('/board/:id/list/:listId', authenticate, async (req: Request, res: Response): Promise<void> => {
   try {
+    const { userId } = req as any;
+    const boardId = Number(getParam(req.params.id));
+    
+    const board = await prisma.board.findFirst({
+      where: { id: boardId, users: { some: { userId: BigInt(userId) } } }
+    });
+    if (!board) {
+      sendError(res, 404, 'Board not found or access denied');
+      return;
+    }
+
     await prisma.list.delete({ where: { id: Number(getParam(req.params.listId)) } });
     res.status(200).send(JSON.stringify({ result: 'Deleted' }));
   } catch (e) {
@@ -479,8 +609,19 @@ app.delete('/board/:id/list/:listId', async (req: Request, res: Response): Promi
   }
 });
 
-app.post('/board/:id/card/', async (req: Request, res: Response): Promise<void> => {
+app.post('/board/:id/card/', authenticate, async (req: Request, res: Response): Promise<void> => {
   try {
+    const { userId } = req as any;
+    const boardId = Number(getParam(req.params.id));
+
+    const board = await prisma.board.findFirst({
+      where: { id: boardId, users: { some: { userId: BigInt(userId) } } }
+    });
+    if (!board) {
+      sendError(res, 404, 'Board not found or access denied');
+      return;
+    }
+
     const {
       title,
       description,

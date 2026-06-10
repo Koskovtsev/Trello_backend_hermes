@@ -13,6 +13,8 @@ model User {
   username     String
   password     String    @default("change_me")
   refreshToken String?
+  resetToken   String?
+  resetTokenExpires DateTime?
   boards       BoardUser[]
   cards        CardUser[]
 }
