@@ -4,7 +4,7 @@ import cors from 'cors';
 import dotenv from 'dotenv';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
-import { sendResetEmail } from './utils/mail';
+// import { sendResetEmail } from './utils/mail';
 
 import path from 'path';
 dotenv.config({ path: path.resolve(process.cwd(), '../.env') });
@@ -228,11 +228,11 @@ app.post('/user/forgot-password', async (req: Request, res: Response): Promise<v
       data: { resetToken, resetTokenExpires: expires },
     });
     console.log(`\x1b[33m[Password Reset]\x1b[0m Email: ${email}, Token: ${resetToken}`);
-    try {
-      await sendResetEmail(email, resetToken);
-    } catch (mailError) {
-      console.error('\x1b[31m[Mail Error]\x1b[0m Failed to send email:', mailError);
-    }
+    // try {
+    //   await sendResetEmail(email, resetToken);
+    // } catch (mailError) {
+    //   console.error('\x1b[31m[Mail Error]\x1b[0m Failed to send email:', mailError);
+    // }
     sendResponse(res, 200, { result: 'Sent' });
   } catch (e) {
     const error = e as Error;
